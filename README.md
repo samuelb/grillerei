@@ -34,23 +34,57 @@ die Karte startet auf der aktuellen GPS-Position.
 
 Anpassen in `app.js` → `CATEGORIES`.
 
-## Cache
+## Woher die Daten kommen
 
-Die Welt ist in ein festes Kachelraster zerlegt (Slippy-Map-Kacheln auf Zoomstufe 12,
-knapp 10 km Kantenlänge). Pro Kachel speichert `cache.js` in IndexedDB, wann sie zuletzt
-geholt wurde und welche Plätze darin liegen.
+Die Welt ist in ein festes Kachelraster zerlegt (Slippy-Map-Kacheln auf Zoomstufe 10,
+knapp 40 km Kantenlänge). Alles – vorgenerierte Dateien, Laufzeit-Cache, Overpass-Abfragen –
+benutzt dasselbe Raster. Eine Kachel wird aus der ersten Quelle bedient, die sie hat:
 
-Beim Laden eines Ausschnitts wird zuerst der Cache gezeichnet; nur die fehlenden oder
-abgelaufenen Kacheln gehen als **ein** kachelbündiges Rechteck an Overpass. Die Abdeckung
-ist dadurch über Sitzungen hinweg zusammensetzbar: ein bereits besuchtes Gebiet erzeugt
-beim Wiederbesuch null Anfragen, ein Schwenk innerhalb geladener Kacheln ebenfalls.
+1. **IndexedDB-Cache** (`cache.js`) – bereits geladene Kacheln, ohne Netzwerk.
+2. **Vorgenerierte Kacheln** unter `data/` – für DACH von einer GitHub Action gebaut und
+   von Pages ausgeliefert. Ein CDN-Abruf, typisch einige zehn Millisekunden.
+3. **Overpass live** – nur außerhalb des vorgebauten Gebiets. Die fehlenden Kacheln gehen
+   als **ein** kachelbündiges Rechteck raus.
 
-- **Haltbarkeit:** 30 Tage (`CACHE_TTL_MS`), danach wird die Kachel neu geholt.
+Weil Quelle 2 keine Rate-Limits kennt, darf die Karte im vorgebauten Gebiet weiter
+herausgezoomt sein (`MIN_ZOOM_STATIC` 9 statt `MIN_ZOOM_LIVE` 11).
+
+### Vorgenerierte Kacheln
+
+`tools/build-data.js` zerlegt den Bereich in kachelbündige Blöcke und fragt Block für Block
+bei Overpass ab – eine einzelne Abfrage über ganz DACH liefe ins Timeout. Weil jeder Block
+vollständig abgefragt wird, ist die Abdeckung exakt bekannt; **alle** Kacheln landen im
+Manifest, auch die leeren.
+
+```
+data/index.json        { zoom, built, bbox, tiles: { "10/549/335": 130, … } }
+data/10/549/335.json   [ { i, c, y, x, t }, … ]     nur wenn nicht leer
+```
+
+Der Bereich ist bewusst ein Rechteck über DE/AT/CH und keine Ländergrenze – so sind auch
+Grenzkacheln vollständig. Anpassen über `DEFAULT_BBOX` im Skript oder `GRILLEREI_BBOX`:
+
+```bash
+GRILLEREI_BBOX="52.40,13.20,52.60,13.50" node tools/build-data.js --out data
+```
+
+Gebaut wird von `.github/workflows/data.yml`: montags per Cron und manuell per
+*workflow_dispatch* (dort lässt sich die Bbox überschreiben). Geänderte Kacheln werden
+committet, danach stößt der Workflow das Pages-Deployment an. Rechne mit rund 15 MB im
+Repo; pro Lauf ändern sich nur einzelne Kacheln.
+
+Kachelt eine Antwort ans Overpass-Limit, bricht der Build ab, statt einen unvollständigen
+Datenstand zu veröffentlichen.
+
+### Laufzeit-Cache
+
+- **Statische Kacheln** tragen den Build-Zeitstempel und gelten genau so lange, wie dieser
+  Build aktuell ist – ein neuer Build ersetzt sie automatisch.
+- **Overpass-Kacheln** laufen nach 30 Tagen ab (`CACHE_TTL_MS`).
 - **Auch leere Kacheln werden gespeichert** – „hier ist nichts“ ist ebenfalls ein Ergebnis.
-- **Obergrenze:** 4000 Kacheln (`CACHE_MAX_TILES`, ~1,4 kB pro Kachel in dicht getaggten
-  Gegenden); darüber werden die ältesten entfernt.
-- Erreicht eine Antwort das Overpass-Limit (`RESULT_LIMIT`), ist sie abgeschnitten und wird
-  bewusst **nicht** gecacht.
+- **Obergrenze:** 4000 Kacheln (`CACHE_MAX_TILES`); darüber werden die ältesten entfernt.
+- Erreicht eine Live-Antwort das Overpass-Limit (`RESULT_LIMIT`), ist sie abgeschnitten und
+  wird bewusst **nicht** gecacht.
 - Ohne IndexedDB (z. B. privater Modus) hält der Cache nur für die Sitzung, die Seite
   funktioniert unverändert. Der Zustand steht unten in der Seitenliste, dort lässt er sich
   auch leeren.
@@ -60,10 +94,14 @@ beim Wiederbesuch null Anfragen, ein Schwenk innerhalb geladener Kacheln ebenfal
 ```
 index.html                    Seitengerüst
 style.css                     Layout, Light/Dark, Marker- und Popup-Stile
-app.js                        Karte, Geolocation, Overpass-Abfrage, Filter, Liste
-cache.js                      Kachelraster + IndexedDB-Cache der geladenen Plätze
+categories.js                 Kategorien, Overpass-Filter, Klassifizierung  (Browser + Build)
+app.js                        Karte, Geolocation, Datenquellen, Filter, Liste
+cache.js                      Kachelraster + IndexedDB-Cache  (Browser + Build)
+tools/build-data.js           erzeugt die vorgenerierten Kacheln unter data/
+data/                         vorgenerierte Kacheln (von der Action gebaut)
 vendor/                       Leaflet 1.9.4 + Leaflet.markercluster 1.5.3 (BSD-2 / MIT)
 .github/workflows/pages.yml   Deploy nach GitHub Pages
+.github/workflows/data.yml    wöchentlicher Datenbuild
 .nojekyll                     kein Jekyll-Processing bei Branch-Deployment
 ```
 

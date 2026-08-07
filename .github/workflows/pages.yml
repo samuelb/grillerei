@@ -3,6 +3,11 @@ name: Deploy to GitHub Pages
 on:
   push:
     branches: [main]
+  # Ein Push mit dem GITHUB_TOKEN löst keine push-Workflows aus. Der Datenbuild
+  # muss das Deployment daher ausdrücklich anstoßen.
+  workflow_run:
+    workflows: ['Platzdaten aktualisieren']
+    types: [completed]
   workflow_dispatch:
 
 permissions:
@@ -18,11 +23,15 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # workflow_run zeigt auf den Stand vor dem Datencommit.
+          ref: main
 
       - uses: actions/configure-pages@v5
 

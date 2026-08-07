@@ -12,12 +12,22 @@
 
 'use strict';
 
-const CACHE_ZOOM = 12;                                  // ~10 km Kantenlänge
-const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;          // 30 Tage
+const CACHE_ZOOM = 10;                                  // ~39 km Kantenlänge
+const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;          // 30 Tage (nur Overpass-Kacheln)
 const CACHE_MAX_TILES = 4000;                           // danach wird gejätet
 const DB_NAME = 'grillerei';
-const DB_VERSION = 1;
+const DB_VERSION = 2;                                   // 2: Raster auf Zoom 10 umgestellt
 const STORE = 'tiles';
+
+/* Eine Kachel ist frisch, wenn sie aus dem aktuellen Datenstand stammt.
+   Kacheln aus dem statischen Build tragen dessen Zeitstempel in `b` und gelten
+   genau so lange, wie der Build aktuell ist. Live von Overpass geholte Kacheln
+   haben kein `b` und laufen nach der TTL ab. */
+function isTileFresh(tile, now, build) {
+  if (!tile) return false;
+  if (tile.b) return tile.b === build;
+  return now - tile.ts < CACHE_TTL_MS;
+}
 
 /* ------------------------------------------------------------- Kachelmathe */
 
@@ -210,3 +220,7 @@ const TileCache = (() => {
     },
   };
 })();
+
+if (typeof module !== 'undefined') {
+  module.exports = { Tiles, TileCache, CACHE_ZOOM, CACHE_TTL_MS, isTileFresh };
+}

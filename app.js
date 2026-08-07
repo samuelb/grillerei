@@ -5,38 +5,10 @@
 
 /* ------------------------------------------------------------------ Konfig */
 
-const CATEGORIES = {
-  bbq: {
-    label: 'Grillplatz',
-    emoji: '🔥',
-    color: '#d9480f',
-    filters: ['nwr["amenity"="bbq"]'],
-  },
-  firepit: {
-    label: 'Feuerstelle',
-    emoji: '🪵',
-    color: '#a53a1c',
-    filters: ['nwr["leisure"="firepit"]'],
-  },
-  picnic: {
-    label: 'Picknickplatz',
-    emoji: '🧺',
-    color: '#2f7d4f',
-    filters: ['nwr["tourism"="picnic_site"]'],
-  },
-  rest: {
-    label: 'Rastplatz',
-    emoji: '🅿️',
-    color: '#2563eb',
-    filters: ['nwr["highway"="rest_area"]', 'nwr["highway"="services"]'],
-  },
-  shelter: {
-    label: 'Schutzhütte',
-    emoji: '⛺',
-    color: '#7c3aed',
-    filters: ['nwr["amenity"="shelter"]["shelter_type"~"^(picnic_shelter|basic_hut|weather_shelter|lean_to)$"]'],
-  },
-};
+/* CATEGORIES, classify(), DETAIL_TAGS und toRecord() stehen in categories.js –
+   dieselbe Datei nutzt das Build-Skript unter tools/. */
+
+const DATA_URL = 'data/';        // vorgenerierte Kacheln, von der Action gebaut
 
 const OVERPASS_ENDPOINTS = [
   'https://overpass-api.de/api/interpreter',
@@ -44,7 +16,9 @@ const OVERPASS_ENDPOINTS = [
   'https://overpass.private.coffee/api/interpreter',
 ];
 
-const MIN_ZOOM_FOR_QUERY = 11;   // darunter wäre die Abfrage zu groß für Overpass
+const MIN_ZOOM_LIVE = 11;        // darunter wäre die Overpass-Abfrage zu groß
+const MIN_ZOOM_STATIC = 9;       // vorgenerierte Kacheln vertragen mehr Übersicht
+const MAX_TILES_PER_LOAD = 32;   // Bremse gegen zu viele gleichzeitige Kacheln
 const RESULT_LIMIT = 2000;       // pro Overpass-Abfrage
 const LIST_LIMIT = 120;          // Einträge in der Seitenliste
 const FALLBACK_VIEW = { center: [51.1, 10.4], zoom: 6 };  // Deutschland
@@ -224,40 +198,88 @@ function scheduleLoad(delay = 500) {
 }
 
 async function loadVisible() {
-  if (map.getZoom() < MIN_ZOOM_FOR_QUERY) {
+  const seq = ++state.loadSeq;
+  const keys = Tiles.cover(map.getBounds().pad(0.15));
+  if (!keys.length) return;
+
+  // Im vorgebauten Gebiet reichen statische Dateien – dort darf die Karte weiter
+  // herausgezoomt sein, weil keine Overpass-Abfrage nötig wird.
+  const manifest = await Manifest.get();
+  if (seq !== state.loadSeq) return;
+
+  const covered = manifest ? keys.filter((k) => k in manifest.tiles) : [];
+  const allStatic = covered.length === keys.length;
+
+  if (map.getZoom() < (allStatic ? MIN_ZOOM_STATIC : MIN_ZOOM_LIVE)
+      || keys.length > MAX_TILES_PER_LOAD) {
     showStatus('Weiter hineinzoomen, um Plätze zu laden.');
     renderList();
     return;
   }
 
-  const seq = ++state.loadSeq;
-  const keys = Tiles.cover(map.getBounds().pad(0.15));
-  if (!keys.length) return;
-
   // 1. Was liegt schon im Cache? Das wird sofort gezeichnet, ohne Netzwerk.
   const cached = await TileCache.get(keys);
-  if (seq !== state.loadSeq) return;   // Karte wurde inzwischen weiterbewegt
+  if (seq !== state.loadSeq) return;
 
   const now = Date.now();
-  const stale = [];
+  const build = manifest?.built;
+  const missing = [];
   for (const key of keys) {
     const tile = cached.get(key);
-    if (tile && now - tile.ts < CACHE_TTL_MS) applyTile(key, tile.f);
-    else stale.push(key);
+    if (isTileFresh(tile, now, build)) applyTile(key, tile.f);
+    else missing.push(key);
   }
   renderList();
   updateCacheInfo();
 
-  if (!stale.length) { hideStatus(); return; }
+  if (!missing.length) { hideStatus(); return; }
 
-  // 2. Nur die fehlenden Kacheln nachladen – als ein kachelbündiges Rechteck.
-  const env = Tiles.envelope(stale);
+  // 2. Fehlendes nachladen: statisch, wo die Action vorgebaut hat, sonst live.
+  const fromStatic = manifest ? missing.filter((k) => k in manifest.tiles) : [];
+  const fromLive = missing.filter((k) => !fromStatic.includes(k));
 
+  showStatus('Plätze werden geladen …');
+  const results = await Promise.allSettled([
+    loadStaticTiles(fromStatic, manifest, seq),
+    loadLiveTiles(fromLive, now, seq),
+  ]);
+
+  if (seq === state.loadSeq) {
+    const failed = results.find((r) => r.status === 'rejected');
+    if (failed) showStatus('Daten gerade nicht erreichbar – später erneut versuchen.', 'error', 6000);
+    else hideStatus();
+  }
+  renderList();
+  updateCacheInfo();
+}
+
+/* Vorgenerierte Kacheln von GitHub Pages. Leere Kacheln stehen im Manifest mit
+   Anzahl 0 und kosten gar keine Anfrage. */
+async function loadStaticTiles(keys, manifest, seq) {
+  if (!keys.length) return;
+
+  const tiles = await Promise.all(keys.map(async (key) => {
+    if (!manifest.tiles[key]) return { k: key, ts: Date.now(), b: manifest.built, f: [] };
+    const res = await fetch(`${DATA_URL}${key}.json`);
+    if (!res.ok) throw new Error(`Kachel ${key}: HTTP ${res.status}`);
+    return { k: key, ts: Date.now(), b: manifest.built, f: await res.json() };
+  }));
+
+  await TileCache.putMany(tiles);
+  if (seq !== state.loadSeq) return;
+  for (const tile of tiles) applyTile(tile.k, tile.f);
+}
+
+/* Alles außerhalb des vorgebauten Gebiets: eine Overpass-Abfrage über das
+   kachelbündige Rechteck der fehlenden Kacheln. */
+async function loadLiveTiles(keys, now, seq) {
+  if (!keys.length) return;
+
+  const env = Tiles.envelope(keys);
   if (state.request) state.request.abort();
   const controller = new AbortController();
   state.request = controller;
   const timer = setTimeout(() => controller.abort(), 35000);
-  showStatus('Plätze werden geladen …');
 
   try {
     const data = await queryOverpass(buildQuery(env), controller.signal);
@@ -269,21 +291,33 @@ async function loadVisible() {
     if (elements.length < RESULT_LIMIT) await TileCache.putMany(tiles);
     else console.warn('Grillerei: Overpass-Limit erreicht, Ausschnitt nicht gecacht');
 
-    if (seq === state.loadSeq) {
-      for (const tile of tiles) applyTile(tile.k, tile.f);
-      hideStatus();
-    }
+    if (seq !== state.loadSeq) return;
+    for (const tile of tiles) applyTile(tile.k, tile.f);
   } catch (err) {
-    if (err.name !== 'AbortError') {
-      showStatus('Overpass antwortet gerade nicht – später erneut versuchen.', 'error', 6000);
-    }
+    if (err.name !== 'AbortError') throw err;
   } finally {
     clearTimeout(timer);
     if (state.request === controller) state.request = null;
-    renderList();
-    updateCacheInfo();
   }
 }
+
+/* Manifest der vorgenerierten Kacheln. Wird einmal geholt und danach im
+   Speicher gehalten; `no-cache` erzwingt eine günstige Revalidierung (304),
+   damit ein neuer Build zeitnah greift. */
+const Manifest = (() => {
+  let promise = null;
+  return {
+    get() {
+      if (!promise) {
+        promise = fetch(`${DATA_URL}index.json`, { cache: 'no-cache' })
+          .then((res) => (res.ok ? res.json() : null))
+          .then((m) => (m && m.zoom === Tiles.zoom ? m : null))
+          .catch(() => null);
+      }
+      return promise;
+    },
+  };
+})();
 
 /* Immer alle Kategorien abfragen, auch ausgeblendete: die Kachel ist damit
    vollständig und ein Filterwechsel löst später keine neue Anfrage aus. */
@@ -306,17 +340,11 @@ function splitIntoTiles(keys, elements, ts) {
   const byTile = new Map(keys.map((k) => [k, []]));
 
   for (const el of elements) {
-    const lat = el.lat ?? el.center?.lat;
-    const lon = el.lon ?? el.center?.lon;
-    if (lat == null || lon == null) continue;
-
-    const tags = el.tags || {};
-    const category = classify(tags);
-    if (!category) continue;
-
-    const bucket = byTile.get(Tiles.keyFor(lat, lon));
+    const record = toRecord(el);
+    if (!record) continue;
+    const bucket = byTile.get(Tiles.keyFor(record.y, record.x));
     if (!bucket) continue;   // außerhalb des angefragten Rechtecks
-    bucket.push({ i: `${el.type}/${el.id}`, c: category, y: lat, x: lon, t: tags });
+    bucket.push(record);
   }
 
   return [...byTile].map(([k, f]) => ({ k, ts, f }));
@@ -393,15 +421,6 @@ function removeFeature(id) {
   state.markers.delete(id);
 }
 
-function classify(tags) {
-  if (tags.amenity === 'bbq') return 'bbq';
-  if (tags.leisure === 'firepit') return 'firepit';
-  if (tags.tourism === 'picnic_site') return 'picnic';
-  if (tags.highway === 'rest_area' || tags.highway === 'services') return 'rest';
-  if (tags.amenity === 'shelter') return 'shelter';
-  return null;
-}
-
 function createMarker(feature) {
   const cat = CATEGORIES[feature.category];
   const marker = L.marker(feature.latlng, {
@@ -415,21 +434,6 @@ function createMarker(feature) {
   marker.bindPopup(() => popupHtml(feature), { maxWidth: 280 });
   return marker;
 }
-
-/* Ausgewählte Tags, die für einen Grillabend tatsächlich relevant sind. */
-const DETAIL_TAGS = [
-  ['fuel', { wood: 'Holz', charcoal: 'Holzkohle', gas: 'Gas', electric: 'Strom' }],
-  ['covered', { yes: 'überdacht' }],
-  ['fireplace', { yes: 'Feuerstelle' }],
-  ['picnic_table', { yes: 'Picknicktisch' }],
-  ['toilets', { yes: 'WC' }],
-  ['drinking_water', { yes: 'Trinkwasser' }],
-  ['waste_basket', { yes: 'Abfalleimer' }],
-  ['wheelchair', { yes: 'barrierefrei', limited: 'teilw. barrierefrei' }],
-  ['fee', { no: 'kostenlos', yes: 'gebührenpflichtig' }],
-  ['access', { permissive: 'geduldet', private: 'privat', customers: 'nur Gäste' }],
-  ['reservation', { required: 'Reservierung nötig' }],
-];
 
 function popupHtml(feature) {
   const { tags, latlng } = feature;
@@ -516,7 +520,7 @@ function renderList() {
   if (!visible.length) {
     const li = document.createElement('li');
     li.className = 'empty';
-    li.textContent = map.getZoom() < MIN_ZOOM_FOR_QUERY
+    li.textContent = map.getZoom() < MIN_ZOOM_STATIC
       ? 'Zoome näher heran, damit Plätze geladen werden.'
       : 'Hier ist nichts eingetragen – verschiebe die Karte oder ergänze den Platz auf openstreetmap.org.';
     listEl.appendChild(li);
