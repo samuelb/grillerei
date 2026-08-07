@@ -9,10 +9,13 @@ die Karte startet auf der aktuellen GPS-Position.
 - **Startpunkt = GPS-Position.** Beim Laden wird `navigator.geolocation` abgefragt; bei
   Ablehnung oder Fehler zeigt die Karte Deutschland, und es kann per Ortssuche
   (Nominatim) navigiert werden. Der Button „Mein Standort“ wiederholt die Abfrage.
-- **Live-Daten.** Beim Verschieben/Zoomen wird der sichtbare Ausschnitt (mit 25 % Rand)
-  bei Overpass abgefragt, entprellt und mit Merker über bereits geladene Bereiche, damit
-  nicht doppelt geladen wird. Ab Zoomstufe 11 aufwärts, darunter wäre die Abfrage zu groß.
+- **Live-Daten.** Beim Verschieben/Zoomen wird der sichtbare Ausschnitt bei Overpass
+  abgefragt, entprellt. Ab Zoomstufe 11 aufwärts, darunter wäre die Abfrage zu groß.
+- **Persistenter Cache** (siehe unten): bereits geladene Gebiete kommen beim Wiederbesuch
+  ohne Netzwerk direkt auf die Karte.
 - **Kategoriefilter** als Chips mit Trefferzahl; die Auswahl wird in `localStorage` gemerkt.
+  Ein Filterwechsel kostet keine Anfrage – es werden immer alle Kategorien geladen und nur
+  clientseitig gefiltert.
 - **Seitenliste** aller Plätze im Ausschnitt, sortiert nach Entfernung zum eigenen Standort
   (oder zur Kartenmitte). Klick springt zum Marker und öffnet das Popup.
 - **Popup** mit Ausstattung (Holz/Holzkohle, überdacht, Picknicktisch, WC, Trinkwasser,
@@ -31,12 +34,34 @@ die Karte startet auf der aktuellen GPS-Position.
 
 Anpassen in `app.js` → `CATEGORIES`.
 
+## Cache
+
+Die Welt ist in ein festes Kachelraster zerlegt (Slippy-Map-Kacheln auf Zoomstufe 12,
+knapp 10 km Kantenlänge). Pro Kachel speichert `cache.js` in IndexedDB, wann sie zuletzt
+geholt wurde und welche Plätze darin liegen.
+
+Beim Laden eines Ausschnitts wird zuerst der Cache gezeichnet; nur die fehlenden oder
+abgelaufenen Kacheln gehen als **ein** kachelbündiges Rechteck an Overpass. Die Abdeckung
+ist dadurch über Sitzungen hinweg zusammensetzbar: ein bereits besuchtes Gebiet erzeugt
+beim Wiederbesuch null Anfragen, ein Schwenk innerhalb geladener Kacheln ebenfalls.
+
+- **Haltbarkeit:** 30 Tage (`CACHE_TTL_MS`), danach wird die Kachel neu geholt.
+- **Auch leere Kacheln werden gespeichert** – „hier ist nichts“ ist ebenfalls ein Ergebnis.
+- **Obergrenze:** 4000 Kacheln (`CACHE_MAX_TILES`, ~1,4 kB pro Kachel in dicht getaggten
+  Gegenden); darüber werden die ältesten entfernt.
+- Erreicht eine Antwort das Overpass-Limit (`RESULT_LIMIT`), ist sie abgeschnitten und wird
+  bewusst **nicht** gecacht.
+- Ohne IndexedDB (z. B. privater Modus) hält der Cache nur für die Sitzung, die Seite
+  funktioniert unverändert. Der Zustand steht unten in der Seitenliste, dort lässt er sich
+  auch leeren.
+
 ## Dateien
 
 ```
 index.html                    Seitengerüst
 style.css                     Layout, Light/Dark, Marker- und Popup-Stile
 app.js                        Karte, Geolocation, Overpass-Abfrage, Filter, Liste
+cache.js                      Kachelraster + IndexedDB-Cache der geladenen Plätze
 vendor/                       Leaflet 1.9.4 + Leaflet.markercluster 1.5.3 (BSD-2 / MIT)
 .github/workflows/pages.yml   Deploy nach GitHub Pages
 .nojekyll                     kein Jekyll-Processing bei Branch-Deployment

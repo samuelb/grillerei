@@ -45,7 +45,7 @@ const OVERPASS_ENDPOINTS = [
 ];
 
 const MIN_ZOOM_FOR_QUERY = 11;   // darunter wäre die Abfrage zu groß für Overpass
-const RESULT_LIMIT = 800;        // pro Overpass-Abfrage
+const RESULT_LIMIT = 2000;       // pro Overpass-Abfrage
 const LIST_LIMIT = 120;          // Einträge in der Seitenliste
 const FALLBACK_VIEW = { center: [51.1, 10.4], zoom: 6 };  // Deutschland
 
@@ -56,14 +56,13 @@ const state = {
   markers: new Map(),            // "node/123" -> L.Marker
   clusters: {},                  // Kategorie -> L.MarkerClusterGroup
   enabled: loadEnabled(),
-  fetched: {},                   // Kategorie -> Array<L.LatLngBounds>
+  tiles: new Map(),              // Kachelschlüssel -> Array<featureId> (bereits gezeichnet)
   userPos: null,                 // L.LatLng
   endpoint: 0,
   request: null,                 // laufender AbortController
   debounce: null,
+  loadSeq: 0,                    // verwirft Ergebnisse überholter Ladevorgänge
 };
-
-Object.keys(CATEGORIES).forEach((key) => { state.fetched[key] = []; });
 
 /* --------------------------------------------------------------------- Map */
 
@@ -121,7 +120,8 @@ function toggleCategory(key, chip) {
   chip.setAttribute('aria-pressed', String(state.enabled.has(key)));
   saveEnabled();
   renderList();
-  scheduleLoad(0);
+  // Kein Nachladen nötig: es werden immer alle Kategorien geholt und nur
+  // clientseitig gefiltert. Ein Filterwechsel kostet damit keine Anfrage.
 }
 
 function loadEnabled() {
@@ -224,21 +224,34 @@ function scheduleLoad(delay = 500) {
 }
 
 async function loadVisible() {
-  if (!state.enabled.size) { hideStatus(); renderList(); return; }
-
   if (map.getZoom() < MIN_ZOOM_FOR_QUERY) {
     showStatus('Weiter hineinzoomen, um Plätze zu laden.');
     renderList();
     return;
   }
 
-  // Etwas über den Bildschirmrand hinaus laden, damit kurzes Verschieben nichts nachlädt.
-  const bounds = map.getBounds().pad(0.25);
-  const missing = [...state.enabled].filter(
-    (key) => !state.fetched[key].some((b) => b.contains(bounds)),
-  );
+  const seq = ++state.loadSeq;
+  const keys = Tiles.cover(map.getBounds().pad(0.15));
+  if (!keys.length) return;
 
-  if (!missing.length) { hideStatus(); renderList(); return; }
+  // 1. Was liegt schon im Cache? Das wird sofort gezeichnet, ohne Netzwerk.
+  const cached = await TileCache.get(keys);
+  if (seq !== state.loadSeq) return;   // Karte wurde inzwischen weiterbewegt
+
+  const now = Date.now();
+  const stale = [];
+  for (const key of keys) {
+    const tile = cached.get(key);
+    if (tile && now - tile.ts < CACHE_TTL_MS) applyTile(key, tile.f);
+    else stale.push(key);
+  }
+  renderList();
+  updateCacheInfo();
+
+  if (!stale.length) { hideStatus(); return; }
+
+  // 2. Nur die fehlenden Kacheln nachladen – als ein kachelbündiges Rechteck.
+  const env = Tiles.envelope(stale);
 
   if (state.request) state.request.abort();
   const controller = new AbortController();
@@ -247,10 +260,19 @@ async function loadVisible() {
   showStatus('Plätze werden geladen …');
 
   try {
-    const data = await queryOverpass(buildQuery(missing, bounds), controller.signal);
-    missing.forEach((key) => rememberFetched(key, bounds));
-    ingest(data.elements || []);
-    hideStatus();
+    const data = await queryOverpass(buildQuery(env), controller.signal);
+    const elements = data.elements || [];
+    const tiles = splitIntoTiles(env.keys, elements, now);
+
+    // Bei erreichtem Limit ist die Antwort abgeschnitten – dann darf sie nicht
+    // als vollständige Kachel im Cache landen.
+    if (elements.length < RESULT_LIMIT) await TileCache.putMany(tiles);
+    else console.warn('Grillerei: Overpass-Limit erreicht, Ausschnitt nicht gecacht');
+
+    if (seq === state.loadSeq) {
+      for (const tile of tiles) applyTile(tile.k, tile.f);
+      hideStatus();
+    }
   } catch (err) {
     if (err.name !== 'AbortError') {
       showStatus('Overpass antwortet gerade nicht – später erneut versuchen.', 'error', 6000);
@@ -259,23 +281,45 @@ async function loadVisible() {
     clearTimeout(timer);
     if (state.request === controller) state.request = null;
     renderList();
+    updateCacheInfo();
   }
 }
 
-function buildQuery(categories, bounds) {
-  const bbox = [
-    bounds.getSouth().toFixed(6),
-    bounds.getWest().toFixed(6),
-    bounds.getNorth().toFixed(6),
-    bounds.getEast().toFixed(6),
-  ].join(',');
+/* Immer alle Kategorien abfragen, auch ausgeblendete: die Kachel ist damit
+   vollständig und ein Filterwechsel löst später keine neue Anfrage aus. */
+function buildQuery(env) {
+  const bbox = [env.south, env.west, env.north, env.east]
+    .map((v) => v.toFixed(6)).join(',');
 
-  const parts = categories
-    .flatMap((key) => CATEGORIES[key].filters)
+  const parts = Object.values(CATEGORIES)
+    .flatMap((cat) => cat.filters)
     .map((f) => `  ${f}(${bbox});`)
     .join('\n');
 
   return `[out:json][timeout:30];\n(\n${parts}\n);\nout center ${RESULT_LIMIT};`;
+}
+
+/* Overpass-Antwort auf die Kacheln des angefragten Rechtecks verteilen.
+   Auch leere Kacheln werden geschrieben – „hier ist nichts“ ist ebenfalls ein
+   Ergebnis, das kein zweites Mal abgefragt werden muss. */
+function splitIntoTiles(keys, elements, ts) {
+  const byTile = new Map(keys.map((k) => [k, []]));
+
+  for (const el of elements) {
+    const lat = el.lat ?? el.center?.lat;
+    const lon = el.lon ?? el.center?.lon;
+    if (lat == null || lon == null) continue;
+
+    const tags = el.tags || {};
+    const category = classify(tags);
+    if (!category) continue;
+
+    const bucket = byTile.get(Tiles.keyFor(lat, lon));
+    if (!bucket) continue;   // außerhalb des angefragten Rechtecks
+    bucket.push({ i: `${el.type}/${el.id}`, c: category, y: lat, x: lon, t: tags });
+  }
+
+  return [...byTile].map(([k, f]) => ({ k, ts, f }));
 }
 
 async function queryOverpass(query, signal) {
@@ -300,44 +344,53 @@ async function queryOverpass(query, signal) {
   throw lastError || new Error('Overpass nicht erreichbar');
 }
 
-function rememberFetched(key, bounds) {
-  const list = state.fetched[key];
-  list.unshift(bounds);
-  if (list.length > 40) list.length = 40;
-}
-
 /* ------------------------------------------------------- Ergebnisse einbauen */
 
-function ingest(elements) {
-  for (const el of elements) {
-    const id = `${el.type}/${el.id}`;
-    if (state.features.has(id)) continue;
+/* Eine Kachel auf die Karte bringen. Wird eine bereits gezeichnete Kachel mit
+   frischen Daten überschrieben, verschwinden zwischenzeitlich in OSM gelöschte
+   Plätze wieder. */
+function applyTile(key, records) {
+  const prev = state.tiles.get(key);
+  const nextIds = new Set(records.map((r) => r.i));
 
-    const lat = el.lat ?? el.center?.lat;
-    const lon = el.lon ?? el.center?.lon;
-    if (lat == null || lon == null) continue;
-
-    const tags = el.tags || {};
-    const category = classify(tags);
-    if (!category) continue;
-
-    const feature = {
-      id,
-      type: el.type,
-      osmId: el.id,
-      category,
-      latlng: L.latLng(lat, lon),
-      name: tags.name || CATEGORIES[category].label,
-      unnamed: !tags.name,
-      tags,
-    };
-
-    state.features.set(id, feature);
-    const marker = createMarker(feature);
-    state.markers.set(id, marker);
-    state.clusters[category].addLayer(marker);
+  if (prev) {
+    if (prev.length === nextIds.size && prev.every((id) => nextIds.has(id))) return;
+    for (const id of prev) if (!nextIds.has(id)) removeFeature(id);
   }
+
+  for (const record of records) addFeature(record);
+  state.tiles.set(key, [...nextIds]);
   updateCounts();
+}
+
+function addFeature(record) {
+  if (state.features.has(record.i)) return;
+
+  const [type, osmId] = record.i.split('/');
+  const tags = record.t || {};
+  const feature = {
+    id: record.i,
+    type,
+    osmId,
+    category: record.c,
+    latlng: L.latLng(record.y, record.x),
+    name: tags.name || CATEGORIES[record.c].label,
+    unnamed: !tags.name,
+    tags,
+  };
+
+  state.features.set(feature.id, feature);
+  const marker = createMarker(feature);
+  state.markers.set(feature.id, marker);
+  state.clusters[feature.category].addLayer(marker);
+}
+
+function removeFeature(id) {
+  const feature = state.features.get(id);
+  const marker = state.markers.get(id);
+  if (marker && feature) state.clusters[feature.category].removeLayer(marker);
+  state.features.delete(id);
+  state.markers.delete(id);
 }
 
 function classify(tags) {
@@ -509,6 +562,32 @@ function formatDistance(m) {
   return `${Math.round(m / 1000)} km`;
 }
 
+/* ----------------------------------------------------------------- Cache */
+
+const cacheInfoEl = document.getElementById('cacheInfo');
+
+async function updateCacheInfo() {
+  const { tiles, persistent } = await TileCache.stats();
+  if (!persistent) {
+    cacheInfoEl.textContent = 'Cache nur für diese Sitzung';
+    return;
+  }
+  cacheInfoEl.textContent = tiles
+    ? `${tiles} ${tiles === 1 ? 'Kachel' : 'Kacheln'} gespeichert`
+    : 'Cache leer';
+}
+
+document.getElementById('cacheClear').addEventListener('click', async () => {
+  await TileCache.clear();
+  state.tiles.clear();
+  for (const id of [...state.features.keys()]) removeFeature(id);
+  updateCounts();
+  renderList();
+  updateCacheInfo();
+  showStatus('Cache geleert.', '', 3000);
+  scheduleLoad(0);
+});
+
 /* ---------------------------------------------------------------- Status */
 
 let statusTimer = null;
@@ -531,3 +610,9 @@ function hideStatus() {
 
 locate(false);
 scheduleLoad(300);
+updateCacheInfo();
+
+// Alten Bestand jäten, sobald die Karte steht – nie im kritischen Pfad.
+setTimeout(() => TileCache.prune().then((n) => {
+  if (n) { console.info(`Grillerei: ${n} alte Kacheln entfernt`); updateCacheInfo(); }
+}), 5000);
