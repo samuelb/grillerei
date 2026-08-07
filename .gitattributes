@@ -1,0 +1,2 @@
+# Vendor-Dateien unverändert lassen (byte-identisch zum Upstream-Release).
+vendor/** -text

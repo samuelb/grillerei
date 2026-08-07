@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Grillerei – Grill- & Rastplätze in der Nähe</title>
+<meta name="description" content="Öffentliche Grillplätze, Feuerstellen, Picknick- und Rastplätze aus OpenStreetMap auf einer Karte.">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#d9480f">
+
+<meta property="og:type" content="website">
+<meta property="og:title" content="Grillerei – Grill- &amp; Rastplätze in der Nähe">
+<meta property="og:description" content="Öffentliche Grillplätze, Feuerstellen, Picknick- und Rastplätze aus OpenStreetMap auf einer Karte.">
+<meta name="twitter:card" content="summary">
+
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%A5%3C/text%3E%3C/svg%3E">
+
+<link rel="stylesheet" href="vendor/leaflet.css">
+<link rel="stylesheet" href="vendor/MarkerCluster.css">
+<link rel="stylesheet" href="vendor/MarkerCluster.Default.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark">🔥</span>
+    <div>
+      <h1>Grillerei</h1>
+      <p>Grill-, Feuer- &amp; Rastplätze aus OpenStreetMap</p>
+    </div>
+  </div>
+
+  <form class="search" id="searchForm" role="search">
+    <input id="searchInput" type="search" placeholder="Ort suchen (z. B. Bodensee)" autocomplete="off" aria-label="Ort suchen">
+    <button type="submit" aria-label="Suchen">Suchen</button>
+  </form>
+
+  <div class="topbar-actions">
+    <button id="locateBtn" class="btn btn-primary" type="button">
+      <span aria-hidden="true">◎</span> Mein Standort
+    </button>
+    <button id="listToggle" class="btn" type="button" aria-expanded="true" aria-controls="sidebar">Liste</button>
+  </div>
+</header>
+
+<div class="filters" id="filters" role="group" aria-label="Kategorien filtern"></div>
+
+<main class="layout">
+  <div id="map" role="application" aria-label="Karte mit Grill- und Rastplätzen"></div>
+
+  <aside id="sidebar" class="sidebar" aria-label="Liste der Plätze">
+    <div class="sidebar-head">
+      <strong id="resultCount">Karte wird geladen …</strong>
+      <span id="resultHint" class="muted">sortiert nach Entfernung</span>
+    </div>
+    <ul id="resultList" class="result-list"></ul>
+  </aside>
+</main>
+
+<div id="status" class="status" role="status" aria-live="polite" hidden></div>
+
+<script src="vendor/leaflet.js"></script>
+<script src="vendor/leaflet.markercluster.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
