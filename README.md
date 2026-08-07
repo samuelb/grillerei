@@ -70,11 +70,26 @@ GRILLEREI_BBOX="52.40,13.20,52.60,13.50" node tools/build-data.js --out data
 
 Gebaut wird von `.github/workflows/data.yml`: montags per Cron und manuell per
 *workflow_dispatch* (dort lässt sich die Bbox überschreiben). Geänderte Kacheln werden
-committet, danach stößt der Workflow das Pages-Deployment an. Rechne mit rund 15 MB im
-Repo; pro Lauf ändern sich nur einzelne Kacheln.
+committet, danach stößt der Workflow das Pages-Deployment an (ein Push mit dem
+`GITHUB_TOKEN` löst selbst keine `on: push`-Workflows aus – daher der `workflow_run`-
+Trigger in `pages.yml`).
 
-Kachelt eine Antwort ans Overpass-Limit, bricht der Build ab, statt einen unvollständigen
-Datenstand zu veröffentlichen.
+Stand des ersten Builds: **119.150 Plätze in 1496 Kacheln, 9,1 MB**, Manifest 24 kB.
+Pro Lauf ändern sich nur einzelne Kacheln.
+
+Overpass ist unter Last unzuverlässig – der erste vollständige Lauf brauchte 30 Abfragen
+und 24 Fehlversuche (429/502/504). Deshalb:
+
+- 8 Versuche je Block mit exponentiellem Backoff bis 5 min, `Retry-After` wird beachtet,
+  bei 429 fragt der Build `/api/status` und wartet gezielt auf den freien Slot.
+- Erfolgreiche Blöcke landen in `.overpass-chunks` und werden von der Action über Läufe
+  hinweg gecacht (3 Tage haltbar). Ein Neustart nach einem Fehlschlag holt nur, was fehlt –
+  aus dem Zwischenspeicher läuft der komplette Build in unter einer Minute.
+- Kachelt eine Antwort ans Overpass-Limit, bricht der Build ab, statt einen unvollständigen
+  Datenstand zu veröffentlichen.
+
+Ändern sich Filter oder Klassifizierung in `categories.js`, muss der Zwischenspeicher
+verworfen werden – er enthält bereits klassifizierte Datensätze.
 
 ### Laufzeit-Cache
 
