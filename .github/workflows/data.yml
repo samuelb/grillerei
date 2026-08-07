@@ -53,12 +53,15 @@ jobs:
 
       - name: Änderungen committen
         run: |
-          if git diff --quiet -- data; then
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Erst stagen, dann den Index prüfen: `git diff` allein sieht neue,
+          # noch unversionierte Kacheln nicht und meldet fälschlich "unverändert".
+          git add -A data
+          if git diff --cached --quiet -- data; then
             echo "Keine Änderungen an den Platzdaten."
             exit 0
           fi
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data
           git commit -m "Platzdaten aktualisiert ($(date -u +%Y-%m-%d))"
           git push
+          git --no-pager diff --stat HEAD~1 -- data | tail -1
