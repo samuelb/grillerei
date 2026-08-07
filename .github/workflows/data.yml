@@ -21,7 +21,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     # Overpass wird blockweise abgefragt, mit Pausen und Wiederholungen.
-    timeout-minutes: 90
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
 
@@ -29,10 +29,27 @@ jobs:
         with:
           node-version: '22'
 
+      # Gelungene Blöcke überleben einen Fehlschlag: ein erneuter Lauf holt nur
+      # noch, was fehlt, statt alles nochmal bei Overpass anzufragen.
+      - name: Zwischenspeicher der Blöcke laden
+        uses: actions/cache/restore@v4
+        with:
+          path: .overpass-chunks
+          key: overpass-chunks-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: overpass-chunks-
+
       - name: Kacheln bauen
         env:
           GRILLEREI_BBOX: ${{ inputs.bbox }}
         run: node tools/build-data.js
+
+      # Auch nach einem Fehlschlag sichern – genau dann bringt er am meisten.
+      - name: Zwischenspeicher der Blöcke sichern
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .overpass-chunks
+          key: overpass-chunks-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Änderungen committen
         run: |
