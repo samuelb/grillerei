@@ -4,39 +4,6 @@ Kleine Karten-Website, die öffentliche **Grillplätze, Feuerstellen, Picknick- 
 sowie **Schutzhütten** anzeigt. Die Daten kommen live aus OpenStreetMap (Overpass API),
 die Karte startet auf der aktuellen GPS-Position.
 
-## Starten
-
-Geolocation funktioniert in Browsern nur in einem *secure context*. Über `file://` blockieren
-Chrome und Safari die Standortabfrage – deshalb einen lokalen Server nutzen:
-
-```bash
-cd /Users/samuel/Workspace/Grillerei
-python3 -m http.server 8000
-```
-
-Dann <http://localhost:8000> öffnen und die Standortfreigabe bestätigen.
-
-## Veröffentlichen (GitHub Pages)
-
-Die Seite ist rein statisch – **kein Framework, kein Bundler, kein Build-Schritt**. Leaflet
-und MarkerCluster liegen unter `vendor/` im Repo, zur Laufzeit wird kein CDN geladen.
-Alle Pfade sind relativ, die Seite funktioniert daher auch unter
-`https://<user>.github.io/<repo>/`.
-
-```bash
-git remote add origin git@github.com:<user>/<repo>.git
-git push -u origin main
-```
-
-Danach in **Settings → Pages → Build and deployment → Source: GitHub Actions** auswählen.
-Der Workflow `.github/workflows/pages.yml` lädt das Repo unverändert als Pages-Artefakt
-hoch und deployt es bei jedem Push auf `main`.
-
-Alternativ ohne Actions: **Source: Deploy from a branch → `main` / `/ (root)`**. Dafür ist
-`.nojekyll` im Repo, damit GitHub die Dateien nicht durch Jekyll schickt.
-
-GitHub Pages liefert per HTTPS aus – die Standortabfrage funktioniert dort also direkt.
-
 ## Funktionen
 
 - **Startpunkt = GPS-Position.** Beim Laden wird `navigator.geolocation` abgefragt; bei
